@@ -256,7 +256,7 @@ class ZenWorkspacesStore extends Store {
 
     for (const record of records) {
       if (record.deleted) {
-        this._collectRemoval(record.id, removals);
+        this._collectRemoval(record, removals);
         continue;
       }
       const data = record.cleartext;
@@ -304,8 +304,8 @@ class ZenWorkspacesStore extends Store {
     return [];
   }
 
-  _collectRemoval(id, removals) {
-    const parsed = parseRecordId(id);
+  _collectRemoval(record, removals) {
+    const parsed = parseRecordId(record.id);
     if (!parsed) {
       return;
     }
@@ -314,7 +314,12 @@ class ZenWorkspacesStore extends Store {
         removals.spaces.push({ uuid: parsed.key });
         break;
       case "tab":
-        removals.tabs.push({ zenSyncId: parsed.key });
+        // The tombstone's server timestamp (seconds) lets the apply side
+        // veto deletions of tabs the user interacted with after the close.
+        removals.tabs.push({
+          zenSyncId: parsed.key,
+          tombstoneModified: record.modified || 0,
+        });
         break;
       case "folder":
         removals.folders.push({ id: parsed.key });
@@ -338,7 +343,7 @@ class ZenWorkspacesStore extends Store {
     try {
       if (record.deleted) {
         const removals = { spaces: [], tabs: [], folders: [], containers: [] };
-        this._collectRemoval(record.id, removals);
+        this._collectRemoval(record, removals);
         await lazy.ZenSyncStore.applyIncomingBatch(
           { spaces: [], tabs: [], folders: [], containers: [] },
           removals,

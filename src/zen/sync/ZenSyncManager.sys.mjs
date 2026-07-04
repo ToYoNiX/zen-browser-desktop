@@ -110,6 +110,11 @@ class ZenSyncManager {
     if (typeof position === "number") {
       syncTabData.position = position;
     }
+    // Relative ordering link, assigned by #normalizeSidebarForSync;
+    // preserved here so re-normalizing an already-normalized tab keeps it.
+    if (tabData.afterId !== undefined) {
+      syncTabData.afterId = tabData.afterId;
+    }
 
     return syncTabData;
   }
@@ -571,12 +576,58 @@ class ZenSyncManager {
     }
   }
 
+  /**
+   * A tab deletion is vetoed when the user meaningfully interacted with the
+   * tab AFTER the remote close happened: the tab is currently selected in
+   * some window, or its lastAccessed is newer than the tombstone. A vetoed
+   * tab is kept and re-uploaded — a deliberate resurrection on every device
+   * — so a stale tab the user just opened never vanishes under them.
+   */
+  #shouldVetoTabRemoval(tabData, tombstoneModifiedMs) {
+    for (const win of Services.wm.getEnumerator("navigator:browser")) {
+      const tab = win.document?.getElementById(tabData.zenSyncId);
+      if (tab && win.gBrowser?.isTab(tab) && tab.selected) {
+        return true;
+      }
+    }
+    return (
+      !!tombstoneModifiedMs && (tabData.lastAccessed || 0) > tombstoneModifiedMs
+    );
+  }
+
   #removeDeletedItems(sidebar, removals) {
     const removedSpaceIds = new Set((removals.spaces || []).map(s => s.uuid));
-    const removedTabIds = new Set((removals.tabs || []).map(t => t.zenSyncId));
     const removedFolderIds = new Set(
       (removals.folders || []).map(f => String(f.id))
     );
+
+    const removedTabIds = new Set();
+    const vetoedTabIds = new Set();
+    for (const removal of removals.tabs || []) {
+      if (!removal.zenSyncId) {
+        continue;
+      }
+      const local = (sidebar.tabs || []).find(
+        tab => tab.zenSyncId === removal.zenSyncId
+      );
+      const tombstoneMs = (removal.tombstoneModified || 0) * 1000;
+      if (local && this.#shouldVetoTabRemoval(local, tombstoneMs)) {
+        vetoedTabIds.add(removal.zenSyncId);
+        this.#scheduleRecordMark(`t~${removal.zenSyncId}`);
+      } else {
+        removedTabIds.add(removal.zenSyncId);
+      }
+    }
+    if (vetoedTabIds.size) {
+      console.info(
+        "ZenSyncManager: Vetoed remote deletion of recently used tabs",
+        [...vetoedTabIds]
+      );
+      // Don't let the live-apply side remove them either.
+      removals.tabs = removals.tabs.filter(
+        removal => !vetoedTabIds.has(removal.zenSyncId)
+      );
+    }
 
     if (removedSpaceIds.size) {
       sidebar.spaces = (sidebar.spaces || []).filter(
@@ -616,38 +667,73 @@ class ZenSyncManager {
     }
 
     if (pulled.tabs?.length) {
-      const tabMap = new Map();
-      const noIdTabs = [];
-
-      for (const tab of sidebar.tabs || []) {
+      // Merge incoming tabs into the LOCAL order using their relative
+      // afterId anchors, instead of re-sorting everything by absolute
+      // position (positions from different devices interleave arbitrarily
+      // and tear the order apart).
+      const order = [...(sidebar.tabs || [])];
+      const byId = new Map();
+      for (const tab of order) {
         if (tab.zenSyncId) {
-          tabMap.set(tab.zenSyncId, tab);
-        } else {
-          noIdTabs.push(tab);
+          byId.set(tab.zenSyncId, tab);
         }
       }
 
-      for (const tab of pulled.tabs) {
-        if (!tab.zenSyncId) {
-          continue;
+      // Resolve chains: when an incoming tab's anchor is itself incoming,
+      // place the anchor first (same trick as #getOrderedIncomingFolders).
+      const incoming = pulled.tabs.filter(tab => tab.zenSyncId);
+      const incomingById = new Map(incoming.map(tab => [tab.zenSyncId, tab]));
+      const chained = [];
+      const seen = new Set();
+      const visit = tab => {
+        if (seen.has(tab.zenSyncId)) {
+          return;
         }
-        const existing = tabMap.get(tab.zenSyncId);
-        tabMap.set(tab.zenSyncId, existing ? { ...existing, ...tab } : tab);
+        seen.add(tab.zenSyncId);
+        const anchor = tab.afterId && incomingById.get(tab.afterId);
+        if (anchor) {
+          visit(anchor);
+        }
+        chained.push(tab);
+      };
+      incoming.forEach(visit);
+
+      for (const tab of chained) {
+        const existing = byId.get(tab.zenSyncId);
+        const merged = existing ? { ...existing, ...tab } : tab;
+        byId.set(tab.zenSyncId, merged);
+
+        const oldIndex = existing ? order.indexOf(existing) : -1;
+        if (oldIndex !== -1) {
+          order.splice(oldIndex, 1);
+        }
+
+        let insertIndex = -1;
+        if (tab.afterId === null) {
+          insertIndex = 0;
+        } else if (tab.afterId) {
+          const anchorTab = byId.get(tab.afterId);
+          const anchorIndex = anchorTab ? order.indexOf(anchorTab) : -1;
+          if (anchorIndex !== -1) {
+            insertIndex = anchorIndex + 1;
+          }
+        }
+        if (insertIndex === -1) {
+          // Legacy record or unknown anchor: fall back to the absolute
+          // position when plausible, otherwise keep/append at the end.
+          insertIndex =
+            oldIndex !== -1
+              ? oldIndex
+              : typeof tab.position === "number" &&
+                  tab.position >= 0 &&
+                  tab.position <= order.length
+                ? tab.position
+                : order.length;
+        }
+        order.splice(insertIndex, 0, merged);
       }
 
-      const syncedTabs = Array.from(tabMap.values());
-      syncedTabs.sort((a, b) => {
-        const aPosition =
-          typeof a.position === "number"
-            ? a.position
-            : Number.POSITIVE_INFINITY;
-        const bPosition =
-          typeof b.position === "number"
-            ? b.position
-            : Number.POSITIVE_INFINITY;
-        return aPosition - bPosition;
-      });
-      sidebar.tabs = [...noIdTabs, ...syncedTabs];
+      sidebar.tabs = order;
     }
 
     if (pulled.folders?.length) {
@@ -676,11 +762,18 @@ class ZenSyncManager {
     for (const space of sidebar.spaces || []) {
       this.guidForUserContextId(space.containerTabId, { create: true });
     }
+    const tabs = this.#getStableSyncTabOrder(sidebar)
+      .map(tab => this.createSyncableTabData(tab))
+      .filter(Boolean);
+    // Relative ordering: each tab links to its predecessor in the canonical
+    // order. A move/insert/close only changes the hashes of the affected
+    // tabs and their immediate followers instead of every tab below them.
+    for (let i = 0; i < tabs.length; i++) {
+      tabs[i].afterId = i ? tabs[i - 1].zenSyncId : null;
+    }
     return {
       ...sidebar,
-      tabs: this.#getStableSyncTabOrder(sidebar)
-        .map(tab => this.createSyncableTabData(tab))
-        .filter(Boolean),
+      tabs,
     };
   }
 
@@ -758,11 +851,11 @@ class ZenSyncManager {
     }
 
     const tabs = new Map();
-    const tabList = sidebar.tabs || [];
-    for (let i = 0; i < tabList.length; i++) {
-      const tab = tabList[i];
+    for (const tab of sidebar.tabs || []) {
       if (tab.zenSyncId && !(tab.zenIsEmpty && !tab.groupId)) {
-        tabs.set(tab.zenSyncId, JSON.stringify({ ...tab, _pos: i }));
+        // No absolute position in the hash: ordering is captured by each
+        // tab's afterId link, so reorders only mark the affected tabs.
+        tabs.set(tab.zenSyncId, JSON.stringify(tab));
       }
     }
 
