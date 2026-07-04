@@ -211,6 +211,7 @@ class ZenSyncManager {
       );
       this.#translateIncomingTabContainers(pulled.tabs || []);
       this.#translateIncomingSpaceContainers(pulled.spaces || []);
+      this.#sanitizeStoredSpaceContainers(sidebar);
       this.#removeDeletedItems(sidebar, removals);
       this.#mergeIncomingItems(sidebar, pulled);
 
@@ -304,7 +305,6 @@ class ZenSyncManager {
   // ---------------------------------------------------------------------
 
   #containerMap = null;
-  #pendingContainerCleanups = [];
 
   #containerGuids() {
     if (!this.#containerMap) {
@@ -329,14 +329,28 @@ class ZenSyncManager {
   }
 
   /**
-   * Ensures a container's record gets uploaded. Notifies the tracker
-   * directly (works outside a sync) and queues the id for the post-apply
-   * drain in the store (covers minting while the tracker ignores changes
-   * during an incoming apply).
+   * Ensures a record id gets marked as changed. Notifies the tracker
+   * directly (works outside a sync, but is swallowed while the tracker
+   * ignores changes during an incoming apply) AND persists the id into the
+   * map file, where the engine drains it at the start of every sync — so
+   * a mark can never be lost to timing or a restart.
    */
+  #scheduleRecordMark(recordId) {
+    const data = this.#containerMap.data;
+    data.pendingUploads ??= [];
+    if (!data.pendingUploads.includes(recordId)) {
+      data.pendingUploads.push(recordId);
+    }
+    this.#saveContainerGuids();
+    Services.obs.notifyObservers(
+      null,
+      "zen-workspace-item-changed",
+      recordId
+    );
+  }
+
   #scheduleContainerRecordUpload(guid) {
-    this.#pendingContainerCleanups.push(`c~${guid}`);
-    Services.obs.notifyObservers(null, "zen-workspace-item-changed", `c~${guid}`);
+    this.#scheduleRecordMark(`c~${guid}`);
   }
 
   #saveContainerGuids() {
@@ -387,14 +401,19 @@ class ZenSyncManager {
   }
 
   /**
-   * Returns (and clears) the record IDs of container records that should be
-   * tombstoned on the server: non-canonical duplicates discovered while
-   * merging, and legacy records keyed by raw userContextId. The engine
-   * marks them as changed after apply so the next upload cleans them up.
+   * Returns (and clears) the persisted record IDs waiting to be marked as
+   * changed: container records scheduled for upload, non-canonical
+   * duplicates and legacy records to tombstone. The engine drains this at
+   * sync start and after each incoming apply.
    */
   takePendingContainerCleanups() {
-    const pending = this.#pendingContainerCleanups;
-    this.#pendingContainerCleanups = [];
+    this.#containerGuids();
+    const data = this.#containerMap.data;
+    const pending = data.pendingUploads || [];
+    data.pendingUploads = [];
+    if (pending.length) {
+      this.#saveContainerGuids();
+    }
     return pending;
   }
 
@@ -414,7 +433,7 @@ class ZenSyncManager {
         // Legacy record keyed by raw userContextId — meaningless across
         // devices. Schedule a server-side cleanup and ignore it.
         if (container.userContextId != null) {
-          this.#pendingContainerCleanups.push(`c~${container.userContextId}`);
+          this.#scheduleRecordMark(`c~${container.userContextId}`);
         }
         continue;
       }
@@ -449,7 +468,7 @@ class ZenSyncManager {
         // non-canonical ones so all devices converge on a single record.
         const all = this.#guidsForUserContextId(identity.userContextId);
         for (const guid of all.slice(1)) {
-          this.#pendingContainerCleanups.push(`c~${guid}`);
+          this.#scheduleRecordMark(`c~${guid}`);
         }
       } else {
         const created = lazy.ContextualIdentityService.create(
@@ -508,6 +527,27 @@ class ZenSyncManager {
         } else {
           // Unknown container: let the shallow merge keep the local value.
           delete space.containerTabId;
+        }
+      }
+      delete space.containerGuid;
+    }
+  }
+
+  /**
+   * Self-heals spaces that carry a raw containerGuid persisted into the
+   * session by an older build (which merged incoming records without
+   * translating them): resolve it against the map if possible, then strip
+   * the field — it must never live in local data.
+   */
+  #sanitizeStoredSpaceContainers(sidebar) {
+    for (const space of sidebar.spaces || []) {
+      if (!("containerGuid" in space)) {
+        continue;
+      }
+      if (space.containerGuid != null) {
+        const userContextId = this.userContextIdForGuid(space.containerGuid);
+        if (userContextId != null) {
+          space.containerTabId = userContextId;
         }
       }
       delete space.containerGuid;

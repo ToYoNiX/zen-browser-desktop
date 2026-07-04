@@ -459,6 +459,12 @@ export class ZenWorkspacesEngine extends SyncEngine {
     // calls don't each re-serialize the entire session.
     lazy.ZenSyncStore.beginSyncCache();
     try {
+      // Drain record marks that were scheduled while no sync was running
+      // (e.g. container records minted at save time, or queued while the
+      // tracker was ignoring changes during a previous apply).
+      for (const recordId of lazy.ZenSyncStore.takePendingContainerCleanups()) {
+        await this._tracker.addChangedID(recordId);
+      }
       await super._sync();
     } finally {
       lazy.ZenSyncStore.endSyncCache();

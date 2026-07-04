@@ -182,7 +182,12 @@ class nsZenWorkspaces {
       const localMap = new Map(
         this._workspaceCache
           .filter(w => !removedSpaceIds.has(w.uuid))
-          .map(w => [w.uuid, w])
+          .map(w => {
+            // Strip sync-envelope pollution an older build may have merged
+            // into the cache; it would leak back into uploads otherwise.
+            const { containerGuid: _cg, ...clean } = w;
+            return [clean.uuid, clean];
+          })
       );
       for (const space of pulled.spaces || []) {
         const existing = localMap.get(space.uuid);
@@ -1571,6 +1576,9 @@ class nsZenWorkspaces {
     for (const workspace of this._workspaceCache) {
       // We don't want to depend on this by mistake
       delete workspace.hasCollapsedPinnedTabs;
+      // Sync-envelope field an older build may have persisted; the sync
+      // manager translates it and it must never live in local data.
+      delete workspace.containerGuid;
     }
     promise.finally(() => {
       this.#hasInitialized = true;
