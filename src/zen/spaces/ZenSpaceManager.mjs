@@ -330,13 +330,19 @@ class nsZenWorkspaces {
       };
     }
 
-    const workspaceId =
-      tab.getAttribute("zen-workspace-id") || this.activeWorkspace;
-    const workspaceElement = this.workspaceElement(workspaceId);
+    // Never guess a workspace: skipping placement (the tab keeps its current
+    // position) beats dumping it into whatever workspace happens to be active.
+    const workspaceId = tab.getAttribute("zen-workspace-id");
+    const workspaceElement = workspaceId
+      ? this.workspaceElement(workspaceId)
+      : null;
+    if (!workspaceElement) {
+      return null;
+    }
     return {
       container: tab.pinned
-        ? workspaceElement?.pinnedTabsContainer
-        : workspaceElement?.tabsContainer,
+        ? workspaceElement.pinnedTabsContainer
+        : workspaceElement.tabsContainer,
       initialSibling: null,
     };
   }
@@ -353,10 +359,15 @@ class nsZenWorkspaces {
       };
     }
 
-    const workspaceId = folderData.workspaceId || this.activeWorkspace;
-    const workspaceElement = this.workspaceElement(workspaceId);
+    // Never guess a workspace; see #getSyncedTabContainer.
+    const workspaceElement = folderData.workspaceId
+      ? this.workspaceElement(folderData.workspaceId)
+      : null;
+    if (!workspaceElement) {
+      return null;
+    }
     return {
-      container: workspaceElement?.pinnedTabsContainer,
+      container: workspaceElement.pinnedTabsContainer,
       parentFolder: null,
     };
   }
@@ -464,11 +475,15 @@ class nsZenWorkspaces {
     this.updateTabsContainers();
   }
 
+  /**
+   * Re-applies the canonical tab order to the live DOM. Must be given the
+   * FULL merged tab list in session-file order — applying only the changed
+   * subset would anchor those tabs at the front of their containers, which
+   * made any tab with an updated record (even just a favicon change) jump
+   * to the top of its section on every other device.
+   */
   #applyIncomingTabPositions(tabDataList) {
-    const orderedTabs = [...tabDataList]
-      .filter(tabData => typeof tabData.position === "number")
-      .sort((a, b) => a.position - b.position);
-
+    const orderedTabs = tabDataList.filter(tabData => tabData?.zenSyncId);
     if (!orderedTabs.length) {
       return;
     }
@@ -496,25 +511,32 @@ class nsZenWorkspaces {
 
       const { container, initialSibling } = placement;
       const previousItem = lastItemByContainer.get(container);
+      lastItemByContainer.set(container, moveItem);
+      movedItems.add(moveItem);
+
+      const anchor =
+        previousItem?.parentNode === container && previousItem !== moveItem
+          ? previousItem
+          : (initialSibling?.parentNode === container &&
+              initialSibling !== moveItem &&
+              initialSibling) ||
+            null;
+
+      // Already in the right spot — don't churn TabMove events.
+      if (
+        moveItem.parentNode === container &&
+        moveItem.previousElementSibling === anchor
+      ) {
+        continue;
+      }
 
       gBrowser.zenHandleTabMove(moveItem, () => {
-        if (
-          previousItem?.parentNode === container &&
-          previousItem !== moveItem
-        ) {
-          previousItem.after(moveItem);
-        } else if (
-          initialSibling?.parentNode === container &&
-          initialSibling !== moveItem
-        ) {
-          initialSibling.after(moveItem);
+        if (anchor) {
+          anchor.after(moveItem);
         } else {
           container.insertBefore(moveItem, container.firstChild);
         }
       });
-
-      lastItemByContainer.set(container, moveItem);
-      movedItems.add(moveItem);
     }
 
     this.makeSureEmptyTabIsFirst();
@@ -868,7 +890,13 @@ class nsZenWorkspaces {
       }
     }
 
-    this.#applyIncomingTabPositions(incomingTabs);
+    // Reposition using the FULL merged order from the session file (which
+    // already reflects both local order and the incoming records); the
+    // incoming subset alone is only a fallback if the file has no tabs yet.
+    const mergedTabs = lazy.ZenSessionStore.getSidebarData()?.tabs;
+    this.#applyIncomingTabPositions(
+      mergedTabs?.length ? mergedTabs : incomingTabs
+    );
     this.#applyIncomingFolderStructure(
       lazy.ZenSessionStore.getSidebarData()?.folders || incomingFolders
     );

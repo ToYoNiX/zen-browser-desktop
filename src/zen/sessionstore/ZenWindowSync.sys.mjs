@@ -1201,10 +1201,6 @@ class nsZenWindowSync {
     Services.obs.notifyObservers(null, "zen-workspace-item-changed", data);
   }
 
-  #notifyMetaChanged() {
-    this.#notifyWorkspaceItemChanged("meta~global");
-  }
-
   #notifySyncItemChanged(item) {
     if (!item?.id) {
       return;
@@ -1706,7 +1702,6 @@ class nsZenWindowSync {
       return;
     }
     this.#notifySyncItemChanged(tabGroup);
-    this.#notifyMetaChanged();
     const window = tabGroup.documentGlobal;
     const isFolder = tabGroup.isZenFolder;
     const isSplitView = tabGroup.hasAttribute("split-view-group");
@@ -1741,7 +1736,6 @@ class nsZenWindowSync {
   on_TabGroupRemoved(aEvent) {
     const tabGroup = aEvent.target;
     this.#notifySyncItemChanged(tabGroup);
-    this.#notifyMetaChanged();
     const window = tabGroup.documentGlobal;
     this.#runOnAllWindows(window, win => {
       const targetGroup = this.getItemFromWindow(win, tabGroup.id);
@@ -1758,7 +1752,6 @@ class nsZenWindowSync {
   on_TabGroupMoved(aEvent) {
     const tabGroup = aEvent.target;
     this.#notifySyncItemChanged(tabGroup);
-    this.#notifyMetaChanged();
     this.#delegateGenericSyncEvent(aEvent, SYNC_FLAG_MOVE);
     return Promise.resolve();
   }

@@ -974,6 +974,29 @@ export class nsZenSessionManager {
     this.#collectTabsData(sidebarData, windows);
     return JSON.parse(JSON.stringify(sidebarData));
   }
+
+  /**
+   * Creates an immediate one-off backup of the session file, used before
+   * potentially destructive sync operations (e.g. first-sync space adoption).
+   *
+   * @param {string} tag Prefix for the backup file name.
+   */
+  async createAdHocBackup(tag) {
+    try {
+      await IOUtils.makeDirectory(this.#backupFolderPath, {
+        ignoreExisting: true,
+        createAncestors: true,
+      });
+      const dest = PathUtils.join(
+        this.#backupFolderPath,
+        `${tag}-${Date.now()}.jsonlz4`
+      );
+      await IOUtils.copy(this.#storeFilePath, dest, { noOverwrite: true });
+      this.log(`Created ad-hoc session backup at ${dest}`);
+    } catch (e) {
+      console.error("ZenSessionManager: Failed to create ad-hoc backup", e);
+    }
+  }
 }
 
 export const ZenSessionStore = new nsZenSessionManager();

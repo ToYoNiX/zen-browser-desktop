@@ -100,7 +100,6 @@ class ZenWorkspacesStore extends Store {
       ids[`c~${c.userContextId}`] = true;
     }
 
-    ids["meta~global"] = true;
     return ids;
   }
 
@@ -122,8 +121,6 @@ class ZenWorkspacesStore extends Store {
         return lazy.ContextualIdentityService.getPublicIdentities().some(
           c => String(c.userContextId) === parsed.key
         );
-      case "meta":
-        return true;
       default:
         return false;
     }
@@ -201,15 +198,12 @@ class ZenWorkspacesStore extends Store {
         break;
       }
 
-      case "meta": {
-        record.cleartext = {
-          id,
-          type: "meta",
-          groups: sidebar.groups || [],
-          splitViewData: sidebar.splitViewData || [],
-        };
+      case "meta":
+        // Groups/split views are no longer synced (they were never applied
+        // to the live UI and ping-ponged between devices). Tombstone any
+        // meta record still on the server.
+        record.deleted = true;
         break;
-      }
 
       default:
         record.deleted = true;
@@ -221,7 +215,6 @@ class ZenWorkspacesStore extends Store {
   async applyIncomingBatch(records, countTelemetry) {
     const pulled = { spaces: [], tabs: [], folders: [], containers: [] };
     const removals = { spaces: [], tabs: [], folders: [], containers: [] };
-    let meta = null;
 
     for (const record of records) {
       if (record.deleted) {
@@ -246,20 +239,20 @@ class ZenWorkspacesStore extends Store {
         case "container":
           pulled.containers.push(clean);
           break;
-        case "meta":
-          meta = {
-            groups: data.groups || [],
-            splitViewData: data.splitViewData || [],
-          };
-          break;
+        // "meta" records (groups/split views) are ignored: they were never
+        // applied to the live UI and only ping-ponged between devices.
       }
     }
+
+    const isFirstSync = !(await this.engine.getLastSync());
 
     // Suppress change tracking while applying incoming data to prevent
     // feedback loops where applied items get re-uploaded immediately.
     this.engine._tracker.ignoreAll = true;
     try {
-      await lazy.ZenSyncStore.applyIncomingBatch(pulled, removals, meta);
+      await lazy.ZenSyncStore.applyIncomingBatch(pulled, removals, null, {
+        isFirstSync,
+      });
     } finally {
       this.engine._tracker.ignoreAll = false;
     }
@@ -314,7 +307,6 @@ class ZenWorkspacesStore extends Store {
       }
       const clean = stripSyncFields(data);
       const pulled = { spaces: [], tabs: [], folders: [], containers: [] };
-      let meta = null;
       switch (data.type) {
         case "space":
           pulled.spaces.push(clean);
@@ -328,17 +320,12 @@ class ZenWorkspacesStore extends Store {
         case "container":
           pulled.containers.push(clean);
           break;
-        case "meta":
-          meta = {
-            groups: data.groups || [],
-            splitViewData: data.splitViewData || [],
-          };
-          break;
+        // "meta" records are ignored; see applyIncomingBatch.
       }
       await lazy.ZenSyncStore.applyIncomingBatch(
         pulled,
         { spaces: [], tabs: [], folders: [], containers: [] },
-        meta
+        null
       );
     } finally {
       this.engine._tracker.ignoreAll = false;
@@ -439,6 +426,17 @@ export class ZenWorkspacesEngine extends SyncEngine {
 
   constructor(service) {
     super("Workspaces", service);
+  }
+
+  async _sync() {
+    // Cache the collected sidebar for the whole sync so per-record store
+    // calls don't each re-serialize the entire session.
+    lazy.ZenSyncStore.beginSyncCache();
+    try {
+      await super._sync();
+    } finally {
+      lazy.ZenSyncStore.endSyncCache();
+    }
   }
 
   get _storeObj() {

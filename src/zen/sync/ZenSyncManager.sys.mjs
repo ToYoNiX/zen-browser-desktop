@@ -13,10 +13,39 @@ ChromeUtils.defineESModuleGetters(lazy, {
 class ZenSyncManager {
   _lastSnapshot = null;
 
+  /**
+   * While a sync is running, the sidebar data is cached so that
+   * getAllIDs/itemExists/createRecord don't re-collect and deep-clone the
+   * entire session (hundreds of tabs) once per record.
+   */
+  #syncCacheActive = false;
+  #cachedSidebarData = null;
+
+  beginSyncCache() {
+    this.#syncCacheActive = true;
+    this.#cachedSidebarData = null;
+  }
+
+  endSyncCache() {
+    this.#syncCacheActive = false;
+    this.#cachedSidebarData = null;
+  }
+
+  invalidateSyncCache() {
+    this.#cachedSidebarData = null;
+  }
+
   getCurrentSidebarData() {
-    return this.#normalizeSidebarForSync(
-      lazy.ZenSessionStore.getCurrentSidebarData(),
+    if (this.#syncCacheActive && this.#cachedSidebarData) {
+      return this.#cachedSidebarData;
+    }
+    const data = this.#normalizeSidebarForSync(
+      lazy.ZenSessionStore.getCurrentSidebarData()
     );
+    if (this.#syncCacheActive) {
+      this.#cachedSidebarData = data;
+    }
+    return data;
   }
 
   createSyncableTabData(
@@ -143,22 +172,23 @@ class ZenSyncManager {
           );
         }
       }
-
-      if (prev.metaHash !== snapshot.metaHash) {
-        Services.obs.notifyObservers(
-          null,
-          "zen-workspace-item-changed",
-          "meta~global"
-        );
-      }
     }
 
     this._lastSnapshot = snapshot;
   }
 
-  async applyIncomingBatch(pulled, removals, meta) {
+  async applyIncomingBatch(
+    pulled,
+    removals,
+    meta,
+    { isFirstSync = false } = {}
+  ) {
     try {
       let sidebar = lazy.ZenSessionStore.getSidebarData();
+
+      if (isFirstSync) {
+        await this.#maybeAdoptRemoteSpaces(sidebar, pulled, removals);
+      }
 
       this.#applyIncomingContainers(
         pulled.containers || [],
@@ -181,7 +211,53 @@ class ZenSyncManager {
       }
     } catch (e) {
       console.error("ZenSyncManager: Failed to apply incoming sync data:", e);
+    } finally {
+      // The sidebar changed under the sync cache; the upload phase that
+      // follows must serialize the post-merge state.
+      this.invalidateSyncCache();
     }
+  }
+
+  /**
+   * First-sync adoption: a brand-new profile auto-creates its own default
+   * space before it ever syncs, so joining an existing account would union
+   * that empty default with the real remote spaces — one junk space per
+   * device. When the local sidebar is pristine and remote spaces exist,
+   * drop the local auto-created space and adopt the remote layout instead.
+   *
+   * Deliberately conservative — this must never destroy user data:
+   *   - only called on the engine's very first sync (lastSync == 0);
+   *   - requires ≥1 incoming remote space (fresh accounts adopt nothing
+   *     and upload the local default as the seed);
+   *   - requires a pristine local sidebar: exactly one space, no folders,
+   *     no pinned/essential tabs, nothing but empty tabs;
+   *   - only ever removes the LOCAL auto-created space, via the same
+   *     removals path a remote space deletion takes;
+   *   - a session-file backup is written right before adopting.
+   */
+  async #maybeAdoptRemoteSpaces(sidebar, pulled, removals) {
+    const localSpaces = sidebar.spaces || [];
+    const incomingSpaces = (pulled.spaces || []).filter(space => space.uuid);
+    if (localSpaces.length !== 1 || !incomingSpaces.length) {
+      return;
+    }
+    const defaultSpace = localSpaces[0];
+    if (incomingSpaces.some(space => space.uuid === defaultSpace.uuid)) {
+      // The remote already knows our space; nothing to adopt.
+      return;
+    }
+    const hasUserData =
+      (sidebar.folders || []).length ||
+      (sidebar.tabs || []).some(tab => !tab.zenIsEmpty);
+    if (hasUserData) {
+      return;
+    }
+    await lazy.ZenSessionStore.createAdHocBackup("pre-space-adoption");
+    console.info(
+      "ZenSyncManager: First sync on a pristine profile — adopting remote spaces and dropping the local default space",
+      defaultSpace.uuid
+    );
+    removals.spaces = [...(removals.spaces || []), { uuid: defaultSpace.uuid }];
   }
 
   #applyIncomingContainers(pulledContainers, removedContainers) {
@@ -431,12 +507,7 @@ class ZenSyncManager {
       }
     }
 
-    const metaHash = JSON.stringify({
-      g: sidebar.groups || [],
-      sv: sidebar.splitViewData || [],
-    });
-
-    return { spaces, tabs, folders, metaHash };
+    return { spaces, tabs, folders };
   }
 }
 
