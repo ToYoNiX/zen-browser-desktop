@@ -313,8 +313,30 @@ class ZenSyncManager {
       });
     }
     this.#containerMap.ensureDataReady();
-    this.#containerMap.data.guids ??= {};
-    return this.#containerMap.data.guids;
+    const data = this.#containerMap.data;
+    data.guids ??= {};
+    if (!data.scheduledInitialUpload) {
+      // One-time migration: GUIDs minted before upload scheduling existed
+      // (see #scheduleContainerRecordUpload) never had their container
+      // records uploaded — mark them all now.
+      data.scheduledInitialUpload = true;
+      for (const guid of Object.keys(data.guids)) {
+        this.#scheduleContainerRecordUpload(guid);
+      }
+      this.#saveContainerGuids();
+    }
+    return data.guids;
+  }
+
+  /**
+   * Ensures a container's record gets uploaded. Notifies the tracker
+   * directly (works outside a sync) and queues the id for the post-apply
+   * drain in the store (covers minting while the tracker ignores changes
+   * during an incoming apply).
+   */
+  #scheduleContainerRecordUpload(guid) {
+    this.#pendingContainerCleanups.push(`c~${guid}`);
+    Services.obs.notifyObservers(null, "zen-workspace-item-changed", `c~${guid}`);
   }
 
   #saveContainerGuids() {
@@ -353,6 +375,10 @@ class ZenSyncManager {
     const guid = Services.uuid.generateUUID().toString().slice(1, -1);
     this.#containerGuids()[guid] = userContextId;
     this.#saveContainerGuids();
+    // Pre-existing containers (e.g. the built-in Personal/Work/Banking/
+    // Shopping) never fire contextual-identity-created, so nothing else
+    // would ever upload their record — schedule it here at mint time.
+    this.#scheduleContainerRecordUpload(guid);
     return guid;
   }
 
@@ -603,6 +629,13 @@ class ZenSyncManager {
   }
 
   #normalizeSidebarForSync(sidebar) {
+    // Mint container GUIDs for workspace assignments at collection time, so
+    // when a space record is uploaded its container record is already
+    // tracked and travels in the same batch (the receiving side applies
+    // containers before it translates spaces).
+    for (const space of sidebar.spaces || []) {
+      this.guidForUserContextId(space.containerTabId, { create: true });
+    }
     return {
       ...sidebar,
       tabs: this.#getStableSyncTabOrder(sidebar)
