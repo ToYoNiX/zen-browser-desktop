@@ -471,13 +471,17 @@ export class ZenWorkspacesEngine extends SyncEngine {
   constructor(service) {
     super("Workspaces", service);
     // Liveness, receiving side: when another device pushes
-    // "sync:collection_changed" for the workspaces collection, sync this
-    // engine right away instead of waiting for the scheduler (~10 min).
-    // Weave.Service has the equivalent listener but only for "clients".
+    // "sync:collection_changed", sync this engine right away instead of
+    // waiting for the scheduler (~10 min). The FxA server validates the
+    // payload against a fixed enum of collection names ("workspaces" is
+    // rejected with 400 invalid payload), so our pushes are sent under
+    // "clients" — meaning we also react to genuine clients pushes such as
+    // send-tab; an extra no-change engine sync is cheap. "workspaces" is
+    // handled too in case the server schema ever learns about it.
     if (!ZenWorkspacesEngine.#observingCollectionChanged) {
       ZenWorkspacesEngine.#observingCollectionChanged = true;
       Services.obs.addObserver((subject, topic, data) => {
-        if (data?.includes("workspaces")) {
+        if (data?.includes("clients") || data?.includes("workspaces")) {
           this.service
             .sync({ why: "collection_changed", engines: ["workspaces"] })
             .catch(e => {
@@ -509,7 +513,10 @@ export class ZenWorkspacesEngine extends SyncEngine {
         {
           version: 1,
           command: "sync:collection_changed",
-          data: { collections: ["workspaces"] },
+          // The FxA server schema only allows a fixed set of collection
+          // names; "clients" is what send-tab uses and what both our
+          // receiver and Weave.Service listen for.
+          data: { collections: ["clients"] },
         },
         DEVICE_NOTIFY_TTL_S
       );

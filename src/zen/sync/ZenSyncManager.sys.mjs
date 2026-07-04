@@ -71,6 +71,14 @@ class ZenSyncManager {
     let entries = Array.isArray(tabData.entries) ? [...tabData.entries] : [];
     let index = typeof tabData.index === "number" ? tabData.index : 1;
 
+    if (!entries.length && !tabData._zenPinnedInitialState?.entry?.url) {
+      // A record with no history and no pinned URL is unrestorable — the
+      // receiving side could only materialize it as a blank tab. Don't
+      // sync it (this happens for lazy tabs whose state was collected
+      // before their session data landed).
+      return null;
+    }
+
     if (trimHistoryForUnpinned && !pinned && entries.length) {
       const entryIndex = Math.max(0, index - 1);
       const entry = entries[entryIndex] || entries[0];

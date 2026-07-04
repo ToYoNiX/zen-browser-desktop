@@ -176,6 +176,26 @@ class nsZenWorkspaces {
     }
     await this.promiseInitialized;
 
+    // Diagnostic: any tab opened while sync changes are being applied that
+    // we didn't create ourselves points at a ghost-tab mechanism (e.g. a
+    // replacement tab spawned by closing another one).
+    const tabOpenWatcher = event => {
+      const tab = event.target;
+      this.log(
+        "Tab opened during sync apply:",
+        tab.getAttribute("id"),
+        tab.linkedBrowser?.currentURI?.spec || "(lazy)"
+      );
+    };
+    window.addEventListener("TabOpen", tabOpenWatcher);
+    try {
+      await this.#applySyncChangesInner(pulled, removals);
+    } finally {
+      window.removeEventListener("TabOpen", tabOpenWatcher);
+    }
+  }
+
+  async #applySyncChangesInner(pulled, removals) {
     // 1. Update workspace cache (remove deleted, merge pulled)
     const removedSpaceIds = new Set((removals.spaces || []).map(s => s.uuid));
     if (removedSpaceIds.size || pulled.spaces?.length) {
@@ -813,6 +833,15 @@ class nsZenWorkspaces {
         continue;
       }
 
+      if (
+        !tabData.entries?.length &&
+        !tabData._zenPinnedInitialState?.entry?.url
+      ) {
+        // Unrestorable record (no history, no pinned URL) — creating it
+        // would only produce a blank ghost tab that syncs back out.
+        continue;
+      }
+
       if (tabData.pinned) {
         // --- PINNED TAB CREATION ---
 
@@ -921,7 +950,13 @@ class nsZenWorkspaces {
       } else {
         // --- UNPINNED TAB CREATION ---
         const activeEntry = this.#getSyncedTabActiveEntry(tabData) || {};
-        const url = activeEntry.url || "about:blank";
+        if (!activeEntry.url) {
+          // Never materialize a content-less record as a blank tab: it
+          // would get a sync id of its own and propagate as a ghost
+          // "new tab" to every device.
+          continue;
+        }
+        const url = activeEntry.url;
         const unpinnedOptions = { createLazyBrowser: true };
         const unpinnedUserContextId = this.#getSyncedTabUserContextId(tabData);
         if (unpinnedUserContextId) {
