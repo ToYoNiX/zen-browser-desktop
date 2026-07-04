@@ -3,9 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import {
+  LegacyTracker,
   Store,
   SyncEngine,
-  Tracker,
 } from "resource://services-sync/engines.sys.mjs";
 import { CryptoWrapper } from "resource://services-sync/record.sys.mjs";
 import { SCORE_INCREMENT_XLARGE } from "resource://services-sync/constants.sys.mjs";
@@ -213,6 +213,16 @@ class ZenWorkspacesStore extends Store {
   }
 
   async applyIncomingBatch(records, countTelemetry) {
+    // Without a browser window to apply changes into, merging only the
+    // on-disk session would be reverted by the next saveState from the
+    // still-stale UI — and then pushed back to the server as a "local
+    // change". Report every record as failed instead: Weave re-delivers
+    // them on the next sync, when a window should exist.
+    const win = Services.wm.getMostRecentWindow("navigator:browser");
+    if (!win?.gZenWorkspaces || win.gZenWorkspaces.privateWindowOrDisabled) {
+      return records.map(record => record.id);
+    }
+
     const pulled = { spaces: [], tabs: [], folders: [], containers: [] };
     const removals = { spaces: [], tabs: [], folders: [], containers: [] };
 
@@ -349,18 +359,9 @@ class ZenWorkspacesStore extends Store {
 // Tracker
 // ---------------------------------------------------------------------------
 
-class ZenWorkspacesTracker extends Tracker {
-  _changedIDs = {};
-  _ignoreAll = false;
-
-  get ignoreAll() {
-    return this._ignoreAll;
-  }
-
-  set ignoreAll(value) {
-    this._ignoreAll = value;
-  }
-
+// LegacyTracker persists the changed-ID set to disk (weave/changes/),
+// so items modified shortly before shutdown still upload after a restart.
+class ZenWorkspacesTracker extends LegacyTracker {
   onStart() {
     Services.obs.addObserver(this, "zen-workspace-item-changed");
     Services.obs.addObserver(this, "contextual-identity-created");
@@ -375,43 +376,24 @@ class ZenWorkspacesTracker extends Tracker {
     Services.obs.removeObserver(this, "contextual-identity-deleted");
   }
 
-  observe(subject, topic, data) {
-    if (this._ignoreAll) {
+  async observe(subject, topic, data) {
+    if (this.ignoreAll) {
       return;
     }
     if (topic === "zen-workspace-item-changed") {
-      this._trackChange(data);
+      await this._trackChange(data);
     } else if (topic.startsWith("contextual-identity-")) {
       const id = subject?.wrappedJSObject?.userContextId;
       if (id) {
-        this._trackChange(`c~${id}`);
+        await this._trackChange(`c~${id}`);
       }
     }
   }
 
-  _trackChange(id) {
-    this._changedIDs[id] = Date.now() / 1000;
-    this.score += SCORE_INCREMENT_XLARGE;
-  }
-
-  async getChangedIDs() {
-    return { ...this._changedIDs };
-  }
-
-  async addChangedID(id, when) {
-    this._changedIDs[id] = when;
-    return true;
-  }
-
-  async removeChangedID(...ids) {
-    for (const id of ids) {
-      delete this._changedIDs[id];
+  async _trackChange(id) {
+    if (await this.addChangedID(id)) {
+      this.score += SCORE_INCREMENT_XLARGE;
     }
-    return true;
-  }
-
-  clearChangedIDs() {
-    this._changedIDs = {};
   }
 }
 
