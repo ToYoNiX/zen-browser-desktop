@@ -1,0 +1,30 @@
+diff --git a/toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs b/toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs
+index 5702ff28cc22206f5ce16584dac8a78d816562ce..1cd7f0fd222f5b6d2a98d7b5b76c22063d81894f 100644
+--- a/toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs
++++ b/toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs
+@@ -270,11 +270,22 @@ _ContextualIdentityService.prototype = {
+     });
+   },
+
+-  create(name, icon, color) {
++  create(name, icon, color, id = null) {
+     this.ensureDataReady();
+
+-    // Retrieve the next userContextId available.
+-    let userContextId = ++this._lastUserContextId;
++    let userContextId;
++    if (
++      id !== null &&
++      !this._identities.some(identity => identity.userContextId === id)
++    ) {
++      userContextId = id;
++      this._lastUserContextId = Math.max(
++        this._lastUserContextId,
++        userContextId
++      );
++    } else {
++      userContextId = ++this._lastUserContextId;
++    }
+
+     // Throw an error if the next userContextId available is invalid (the one associated to
+     // MAX_USER_CONTEXT_ID is already reserved to "userContextIdInternal.webextStorageLocal", which

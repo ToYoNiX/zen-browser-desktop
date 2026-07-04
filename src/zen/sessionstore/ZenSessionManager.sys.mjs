@@ -10,6 +10,7 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   ZenLiveFoldersManager:
     "resource:///modules/zen/ZenLiveFoldersManager.sys.mjs",
+  ZenSyncStore: "resource:///modules/zen/ZenSyncManager.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
   SessionStore: "resource:///modules/sessionstore/SessionStore.sys.mjs",
   SessionStartup: "resource:///modules/sessionstore/SessionStartup.sys.mjs",
@@ -312,6 +313,7 @@ export class nsZenSessionManager {
       }
     }
     delete this._dataFromFile;
+    lazy.ZenSyncStore.seedSnapshot(this.#sidebar);
   }
 
   get #shouldRestoreOnlyPinned() {
@@ -609,6 +611,7 @@ export class nsZenSessionManager {
       }
     );
     this.#collectWindowData(windows);
+    lazy.ZenSyncStore.noteSidebarDataChanged(this.#sidebar);
     // This would save the data to disk asynchronously or when quitting the app.
     let sidebar = this.#sidebarWithoutCloning;
     this.#file.data = sidebar;
@@ -724,6 +727,7 @@ export class nsZenSessionManager {
 
     sidebarData.lastCollected = Date.now();
     this.#collectTabsData(sidebarData, aStateWindows);
+
     this.#sidebar = sidebarData;
   }
 
@@ -932,6 +936,43 @@ export class nsZenSessionManager {
       return [];
     }
     return Cu.cloneInto(sidebar.spaces, {});
+  }
+
+  /**
+   * Returns a deep clone of the full sidebar object (spaces, tabs, folders, etc.).
+   * Used by the ZenWorkspacesSync engine to build the sync payload.
+   *
+   * @returns {object} A deep clone of the sidebar data.
+   */
+  getSidebarData() {
+    const sidebar = this.#sidebar;
+    if (!sidebar) {
+      return {};
+    }
+    return sidebar;
+  }
+
+  replaceSidebarData(sidebar, soon = true) {
+    this.#sidebar = sidebar || {};
+    this.#file.data = this.#sidebarWithoutCloning;
+    if (soon) {
+      this.#file.saveSoon();
+    } else {
+      this.#file._save();
+    }
+  }
+
+  getCurrentSidebarData() {
+    const state = lazy.SessionStore.getCurrentState(true);
+    let windows = state?.windows || [];
+    windows = windows.filter(win => this.#isWindowSaveable(win));
+    if (!windows.length) {
+      return this.getSidebarData();
+    }
+
+    const sidebarData = { lastCollected: Date.now() };
+    this.#collectTabsData(sidebarData, windows);
+    return JSON.parse(JSON.stringify(sidebarData));
   }
 }
 
