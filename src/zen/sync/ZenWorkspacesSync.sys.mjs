@@ -18,6 +18,17 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "resource://gre/modules/ContextualIdentityService.sys.mjs",
 });
 
+ChromeUtils.defineLazyGetter(lazy, "fxAccounts", () => {
+  return ChromeUtils.importESModule(
+    "resource://gre/modules/FxAccounts.sys.mjs"
+  ).getFxAccountsSingleton();
+});
+
+// Minimum delay between "please sync now" pushes to other devices.
+const DEVICE_NOTIFY_DEBOUNCE_MS = 10_000;
+// How long the push message may be queued for a briefly offline device.
+const DEVICE_NOTIFY_TTL_S = 60;
+
 // ---------------------------------------------------------------------------
 // Record
 // ---------------------------------------------------------------------------
@@ -455,14 +466,64 @@ export class ZenWorkspacesEngine extends SyncEngine {
     return "Workspaces";
   }
 
+  static #observingCollectionChanged = false;
+
   constructor(service) {
     super("Workspaces", service);
+    // Liveness, receiving side: when another device pushes
+    // "sync:collection_changed" for the workspaces collection, sync this
+    // engine right away instead of waiting for the scheduler (~10 min).
+    // Weave.Service has the equivalent listener but only for "clients".
+    if (!ZenWorkspacesEngine.#observingCollectionChanged) {
+      ZenWorkspacesEngine.#observingCollectionChanged = true;
+      Services.obs.addObserver((subject, topic, data) => {
+        if (data?.includes("workspaces")) {
+          this.service
+            .sync({ why: "collection_changed", engines: ["workspaces"] })
+            .catch(e => {
+              this._log.warn("Push-triggered workspaces sync failed", e);
+            });
+        }
+      }, "sync:collection_changed");
+    }
+  }
+
+  #lastDeviceNotify = 0;
+
+  /**
+   * Liveness, sending side: after we upload workspace changes, ping every
+   * other device (FxA push, same channel the built-in tabs engine uses) so
+   * they pull the changes within seconds. Debounced and best-effort.
+   */
+  async #notifyOtherDevices() {
+    const now = Date.now();
+    if (now - this.#lastDeviceNotify < DEVICE_NOTIFY_DEBOUNCE_MS) {
+      return;
+    }
+    this.#lastDeviceNotify = now;
+    try {
+      const localId = await lazy.fxAccounts.device.getLocalId();
+      await lazy.fxAccounts.notifyDevices(
+        null,
+        localId ? [localId] : [],
+        {
+          version: 1,
+          command: "sync:collection_changed",
+          data: { collections: ["workspaces"] },
+        },
+        DEVICE_NOTIFY_TTL_S
+      );
+      this._log.debug("Notified other devices about workspace changes");
+    } catch (e) {
+      this._log.warn("Failed to notify other devices", e);
+    }
   }
 
   async _sync() {
     // Cache the collected sidebar for the whole sync so per-record store
     // calls don't each re-serialize the entire session.
     lazy.ZenSyncStore.beginSyncCache();
+    let hadChanges = false;
     try {
       // Drain record marks that were scheduled while no sync was running
       // (e.g. container records minted at save time, or queued while the
@@ -470,9 +531,14 @@ export class ZenWorkspacesEngine extends SyncEngine {
       for (const recordId of lazy.ZenSyncStore.takePendingContainerCleanups()) {
         await this._tracker.addChangedID(recordId);
       }
+      hadChanges = !!Object.keys(await this._tracker.getChangedIDs()).length;
       await super._sync();
     } finally {
       lazy.ZenSyncStore.endSyncCache();
+    }
+    if (hadChanges) {
+      // Only reached when the sync succeeded (finally doesn't swallow).
+      this.#notifyOtherDevices();
     }
   }
 
