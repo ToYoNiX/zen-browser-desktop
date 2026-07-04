@@ -8,7 +8,14 @@ ChromeUtils.defineESModuleGetters(lazy, {
   ZenSessionStore: "resource:///modules/zen/ZenSessionManager.sys.mjs",
   ContextualIdentityService:
     "resource://gre/modules/ContextualIdentityService.sys.mjs",
+  JSONFile: "resource://gre/modules/JSONFile.sys.mjs",
 });
+
+// Maps sync GUIDs to local userContextIds. Container userContextIds are
+// device-local (two devices independently create "container #6" for
+// unrelated things), so sync records are keyed by GUID and translated to
+// local ids on each device.
+const CONTAINER_MAP_FILE = "zen-sync-containers.json";
 
 class ZenSyncManager {
   _lastSnapshot = null;
@@ -85,6 +92,14 @@ class ZenSyncManager {
       zenSyncId: tabData.zenSyncId,
       zenWorkspace: isEssential ? null : tabData.zenWorkspace || null,
     };
+
+    const containerGuid = this.guidForUserContextId(
+      syncTabData.userContextId,
+      { create: true }
+    );
+    if (containerGuid) {
+      syncTabData.containerGuid = containerGuid;
+    }
 
     if (typeof tabData.zenStaticLabel === "string") {
       syncTabData.zenStaticLabel = tabData.zenStaticLabel;
@@ -194,6 +209,7 @@ class ZenSyncManager {
         pulled.containers || [],
         removals.containers || []
       );
+      this.#translateIncomingTabContainers(pulled.tabs || []);
       this.#removeDeletedItems(sidebar, removals);
       this.#mergeIncomingItems(sidebar, pulled);
 
@@ -282,54 +298,183 @@ class ZenSyncManager {
     };
   }
 
+  // ---------------------------------------------------------------------
+  // Container GUID mapping
+  // ---------------------------------------------------------------------
+
+  #containerMap = null;
+  #pendingContainerCleanups = [];
+
+  #containerGuids() {
+    if (!this.#containerMap) {
+      this.#containerMap = new lazy.JSONFile({
+        path: PathUtils.join(PathUtils.profileDir, CONTAINER_MAP_FILE),
+      });
+    }
+    this.#containerMap.ensureDataReady();
+    this.#containerMap.data.guids ??= {};
+    return this.#containerMap.data.guids;
+  }
+
+  #saveContainerGuids() {
+    this.#containerMap.saveSoon();
+  }
+
+  #guidsForUserContextId(userContextId) {
+    const guids = this.#containerGuids();
+    return Object.keys(guids)
+      .filter(guid => guids[guid] === userContextId)
+      .sort();
+  }
+
+  /**
+   * Returns the canonical sync GUID for a local container: the
+   * lexicographically smallest known GUID, so all devices converge on the
+   * same record for a shared container. With `create`, mints and persists
+   * a new GUID for a container that has none yet.
+   */
+  guidForUserContextId(userContextId, { create = false } = {}) {
+    userContextId = parseInt(userContextId, 10) || 0;
+    if (!userContextId) {
+      // The default (no) container is never synced as a container.
+      return null;
+    }
+    const known = this.#guidsForUserContextId(userContextId);
+    if (known.length) {
+      return known[0];
+    }
+    if (
+      !create ||
+      !lazy.ContextualIdentityService.getPublicIdentityFromId(userContextId)
+    ) {
+      return null;
+    }
+    const guid = Services.uuid.generateUUID().toString().slice(1, -1);
+    this.#containerGuids()[guid] = userContextId;
+    this.#saveContainerGuids();
+    return guid;
+  }
+
+  userContextIdForGuid(guid) {
+    return this.#containerGuids()[guid] ?? null;
+  }
+
+  /**
+   * Returns (and clears) the record IDs of container records that should be
+   * tombstoned on the server: non-canonical duplicates discovered while
+   * merging, and legacy records keyed by raw userContextId. The engine
+   * marks them as changed after apply so the next upload cleans them up.
+   */
+  takePendingContainerCleanups() {
+    const pending = this.#pendingContainerCleanups;
+    this.#pendingContainerCleanups = [];
+    return pending;
+  }
+
+  #containerLabel(userContextId) {
+    try {
+      return lazy.ContextualIdentityService.getUserContextLabel(userContextId);
+    } catch {
+      return "";
+    }
+  }
+
   #applyIncomingContainers(pulledContainers, removedContainers) {
-    const localContainers =
-      lazy.ContextualIdentityService.getPublicIdentities();
+    const guids = this.#containerGuids();
 
     for (const container of pulledContainers) {
+      if (!container.guid) {
+        // Legacy record keyed by raw userContextId — meaningless across
+        // devices. Schedule a server-side cleanup and ignore it.
+        if (container.userContextId != null) {
+          this.#pendingContainerCleanups.push(`c~${container.userContextId}`);
+        }
+        continue;
+      }
       if (!container.name) {
         continue;
       }
 
-      const existsLocally = localContainers.some(
-        c => String(c.userContextId) === String(container.userContextId)
-      );
+      let userContextId = guids[container.guid];
+      let identity = userContextId
+        ? lazy.ContextualIdentityService.getPublicIdentityFromId(userContextId)
+        : null;
 
-      if (existsLocally) {
+      if (!identity) {
+        // Unknown GUID: match an existing local container by display name so
+        // containers created independently on both devices merge instead of
+        // duplicating (or worse, overwriting an unrelated container that
+        // happens to share a numeric id).
+        identity = lazy.ContextualIdentityService.getPublicIdentities().find(
+          c => this.#containerLabel(c.userContextId) === container.name
+        );
+      }
+
+      if (identity) {
+        guids[container.guid] = identity.userContextId;
         lazy.ContextualIdentityService.update(
-          container.userContextId,
+          identity.userContextId,
           container.name,
           container.icon,
           container.color
         );
-        continue;
-      }
-
-      const createdIdentity = lazy.ContextualIdentityService.create(
-        container.name,
-        container.icon,
-        container.color,
-        container.userContextId
-      );
-      if (
-        createdIdentity &&
-        String(createdIdentity.userContextId) !==
-          String(container.userContextId)
-      ) {
-        console.warn("ZenSyncManager: Container sync created unexpected ID", {
-          requestedId: container.userContextId,
-          createdId: createdIdentity.userContextId,
-          name: container.name,
-        });
+        // If this container now has several GUIDs, tombstone the
+        // non-canonical ones so all devices converge on a single record.
+        const all = this.#guidsForUserContextId(identity.userContextId);
+        for (const guid of all.slice(1)) {
+          this.#pendingContainerCleanups.push(`c~${guid}`);
+        }
+      } else {
+        const created = lazy.ContextualIdentityService.create(
+          container.name,
+          container.icon,
+          container.color
+        );
+        guids[container.guid] = created.userContextId;
       }
     }
 
     for (const container of removedContainers) {
-      try {
-        lazy.ContextualIdentityService.remove(container.userContextId);
-      } catch {
-        // Container may already be gone locally.
+      if (!container.guid) {
+        continue;
       }
+      const userContextId = guids[container.guid];
+      if (!userContextId) {
+        continue;
+      }
+      const all = this.#guidsForUserContextId(userContextId);
+      delete guids[container.guid];
+      if (all[0] === container.guid) {
+        // Canonical tombstone → the user really deleted this container.
+        // A non-canonical tombstone is just cross-device record cleanup.
+        for (const guid of all) {
+          delete guids[guid];
+        }
+        try {
+          lazy.ContextualIdentityService.remove(userContextId);
+        } catch {
+          // Container may already be gone locally.
+        }
+      }
+    }
+
+    this.#saveContainerGuids();
+  }
+
+  /**
+   * Rewrites incoming tab records' container references from sync GUIDs to
+   * this device's userContextIds. Must run after #applyIncomingContainers
+   * so freshly created containers are already in the map.
+   */
+  #translateIncomingTabContainers(tabs) {
+    for (const tab of tabs) {
+      if (!tab.containerGuid) {
+        continue;
+      }
+      const userContextId = this.userContextIdForGuid(tab.containerGuid);
+      // An unknown container maps to the default one rather than to
+      // whatever local container happens to own the remote numeric id.
+      tab.userContextId = userContextId ?? 0;
     }
   }
 

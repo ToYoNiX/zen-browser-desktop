@@ -97,7 +97,12 @@ class ZenWorkspacesStore extends Store {
     }
 
     for (const c of lazy.ContextualIdentityService.getPublicIdentities()) {
-      ids[`c~${c.userContextId}`] = true;
+      const guid = lazy.ZenSyncStore.guidForUserContextId(c.userContextId, {
+        create: true,
+      });
+      if (guid) {
+        ids[`c~${guid}`] = true;
+      }
     }
 
     return ids;
@@ -118,9 +123,7 @@ class ZenWorkspacesStore extends Store {
       case "folder":
         return (sidebar.folders || []).some(f => String(f.id) === parsed.key);
       case "container":
-        return lazy.ContextualIdentityService.getPublicIdentities().some(
-          c => String(c.userContextId) === parsed.key
-        );
+        return lazy.ZenSyncStore.userContextIdForGuid(parsed.key) != null;
       default:
         return false;
     }
@@ -179,21 +182,39 @@ class ZenWorkspacesStore extends Store {
       }
 
       case "container": {
-        const container =
-          lazy.ContextualIdentityService.getPublicIdentities().find(
-            c => String(c.userContextId) === parsed.key
-          );
-        if (!container) {
+        const userContextId = lazy.ZenSyncStore.userContextIdForGuid(
+          parsed.key
+        );
+        const identity = userContextId
+          ? lazy.ContextualIdentityService.getPublicIdentityFromId(
+              userContextId
+            )
+          : null;
+        const canonical = identity
+          ? lazy.ZenSyncStore.guidForUserContextId(userContextId)
+          : null;
+        if (!identity || canonical !== parsed.key) {
+          // Deleted container, legacy record keyed by raw userContextId,
+          // or a non-canonical duplicate — clean it off the server.
           record.deleted = true;
           return record;
+        }
+        let name = identity.name;
+        try {
+          name =
+            lazy.ContextualIdentityService.getUserContextLabel(
+              identity.userContextId
+            ) || identity.name;
+        } catch {
+          // Fall back to the raw name for containers without a label.
         }
         record.cleartext = {
           id,
           type: "container",
-          userContextId: container.userContextId,
-          name: container.name,
-          icon: container.icon,
-          color: container.color,
+          guid: parsed.key,
+          name,
+          icon: identity.icon,
+          color: identity.color,
         };
         break;
       }
@@ -266,6 +287,13 @@ class ZenWorkspacesStore extends Store {
     } finally {
       this.engine._tracker.ignoreAll = false;
     }
+
+    // Mark container records that the merge flagged for server-side cleanup
+    // (legacy ids, non-canonical duplicates) so the next upload tombstones
+    // them. Must happen after ignoreAll is lifted.
+    for (const recordId of lazy.ZenSyncStore.takePendingContainerCleanups()) {
+      await this.engine._tracker.addChangedID(recordId);
+    }
     return [];
   }
 
@@ -285,7 +313,7 @@ class ZenWorkspacesStore extends Store {
         removals.folders.push({ id: parsed.key });
         break;
       case "container":
-        removals.containers.push({ userContextId: parsed.key });
+        removals.containers.push({ guid: parsed.key });
         break;
     }
   }
@@ -383,9 +411,18 @@ class ZenWorkspacesTracker extends LegacyTracker {
     if (topic === "zen-workspace-item-changed") {
       await this._trackChange(data);
     } else if (topic.startsWith("contextual-identity-")) {
-      const id = subject?.wrappedJSObject?.userContextId;
-      if (id) {
-        await this._trackChange(`c~${id}`);
+      const userContextId = subject?.wrappedJSObject?.userContextId;
+      if (!userContextId) {
+        return;
+      }
+      // Records are keyed by sync GUID, not by the device-local id. Mint a
+      // GUID for newly created containers; deleted ones keep their mapping
+      // entry so the tombstone can still be uploaded.
+      const guid = lazy.ZenSyncStore.guidForUserContextId(userContextId, {
+        create: topic !== "contextual-identity-deleted",
+      });
+      if (guid) {
+        await this._trackChange(`c~${guid}`);
       }
     }
   }
