@@ -149,6 +149,13 @@ class ZenWorkspacesStore extends Store {
         }
         const { syncStatus: _sx, ...rest } = spaces[idx];
         record.cleartext = { id, type: "space", ...rest, position: idx };
+        // The default-container assignment is shipped as a sync GUID; the
+        // raw containerTabId is device-local and meaningless elsewhere.
+        record.cleartext.containerGuid = lazy.ZenSyncStore.guidForUserContextId(
+          rest.containerTabId,
+          { create: true }
+        );
+        delete record.cleartext.containerTabId;
         break;
       }
 

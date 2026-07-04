@@ -210,6 +210,7 @@ class ZenSyncManager {
         removals.containers || []
       );
       this.#translateIncomingTabContainers(pulled.tabs || []);
+      this.#translateIncomingSpaceContainers(pulled.spaces || []);
       this.#removeDeletedItems(sidebar, removals);
       this.#mergeIncomingItems(sidebar, pulled);
 
@@ -459,6 +460,32 @@ class ZenSyncManager {
     }
 
     this.#saveContainerGuids();
+  }
+
+  /**
+   * Rewrites incoming space records' default-container assignment from the
+   * sync GUID to this device's userContextId. An explicit null GUID means
+   * "no container"; an unknown GUID (its container record hasn't arrived
+   * yet) keeps whatever the local space already has.
+   */
+  #translateIncomingSpaceContainers(spaces) {
+    for (const space of spaces) {
+      if (!("containerGuid" in space)) {
+        continue;
+      }
+      if (space.containerGuid == null) {
+        space.containerTabId = 0;
+      } else {
+        const userContextId = this.userContextIdForGuid(space.containerGuid);
+        if (userContextId != null) {
+          space.containerTabId = userContextId;
+        } else {
+          // Unknown container: let the shallow merge keep the local value.
+          delete space.containerTabId;
+        }
+      }
+      delete space.containerGuid;
+    }
   }
 
   /**
