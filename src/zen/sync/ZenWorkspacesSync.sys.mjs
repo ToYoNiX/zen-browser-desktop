@@ -482,11 +482,16 @@ export class ZenWorkspacesEngine extends SyncEngine {
       ZenWorkspacesEngine.#observingCollectionChanged = true;
       Services.obs.addObserver((subject, topic, data) => {
         if (data?.includes("clients") || data?.includes("workspaces")) {
-          this.service
-            .sync({ why: "collection_changed", engines: ["workspaces"] })
-            .catch(e => {
-              this._log.warn("Push-triggered workspaces sync failed", e);
-            });
+          // Don't call service.sync() directly: Weave.Service reacts to
+          // this same notification first and grabs the sync lock for a
+          // clients-only sync, so a direct call loses the race and gets
+          // dropped. The scheduler coalesces, waits out the running sync
+          // and handles backoff — same pattern Firefox uses for wake/push.
+          this._log.debug("Push received; scheduling workspaces sync");
+          this.service.scheduler.scheduleNextSync(2000, {
+            engines: ["workspaces"],
+            why: "collection_changed",
+          });
         }
       }, "sync:collection_changed");
     }
