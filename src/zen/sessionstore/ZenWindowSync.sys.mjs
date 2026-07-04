@@ -1604,6 +1604,9 @@ class nsZenWindowSync {
     };
     this.#lastFocusedWindow = new WeakRef(window);
     this.#lastSelectedTab = new WeakRef(window.gBrowser.selectedTab);
+    // The user came (back) to this instance: let the sync engine pull
+    // recent changes, like the synced-tabs menu does when opened.
+    Services.obs.notifyObservers(null, "zen-workspace-window-focused");
     window.addEventListener("TabSelect", onTabSelect, { once: true });
     // eslint-disable-next-line no-async-promise-executor
     this.#docShellSwitchPromise = new Promise(async resolve => {

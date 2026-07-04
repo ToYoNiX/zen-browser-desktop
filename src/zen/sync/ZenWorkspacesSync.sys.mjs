@@ -487,17 +487,44 @@ export class ZenWorkspacesEngine extends SyncEngine {
           // clients-only sync, so a direct call loses the race and gets
           // dropped. The scheduler coalesces, waits out the running sync
           // and handles backoff — same pattern Firefox uses for wake/push.
-          this._log.debug("Push received; scheduling workspaces sync");
+          console.info("ZenSync: push received — scheduling workspaces sync");
           this.service.scheduler.scheduleNextSync(2000, {
             engines: ["workspaces"],
             why: "collection_changed",
           });
         }
       }, "sync:collection_changed");
+      // Pull-on-interest, the same trick the synced-tabs menu uses (it
+      // syncs the tabs engine when opened): when the user comes back to
+      // this window, pull our engine — perceived liveness even if the
+      // push was missed. Debounced via #maybePullOnFocus.
+      Services.obs.addObserver(() => {
+        this.#maybePullOnFocus();
+      }, "zen-workspace-window-focused");
     }
   }
 
   #lastDeviceNotify = 0;
+  #lastFocusPull = 0;
+
+  /**
+   * Schedules a workspaces pull when the user focuses a window, at most
+   * once every 30s. This is what makes changes from other devices appear
+   * "immediately" when switching to this instance, matching the synced-tabs
+   * menu behavior (which syncs the tabs engine every time it is opened).
+   */
+  #maybePullOnFocus() {
+    const now = Date.now();
+    if (now - this.#lastFocusPull < 30_000) {
+      return;
+    }
+    this.#lastFocusPull = now;
+    console.info("ZenSync: window focused — scheduling workspaces pull");
+    this.service.scheduler.scheduleNextSync(500, {
+      engines: ["workspaces"],
+      why: "focus",
+    });
+  }
 
   /**
    * Liveness, sending side: after we upload workspace changes, ping every
@@ -525,9 +552,9 @@ export class ZenWorkspacesEngine extends SyncEngine {
         },
         DEVICE_NOTIFY_TTL_S
       );
-      this._log.debug("Notified other devices about workspace changes");
+      console.info("ZenSync: notified other devices about workspace changes");
     } catch (e) {
-      this._log.warn("Failed to notify other devices", e);
+      console.error("ZenSync: failed to notify other devices", e);
     }
   }
 
