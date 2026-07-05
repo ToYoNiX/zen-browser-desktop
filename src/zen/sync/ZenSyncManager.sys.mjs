@@ -565,10 +565,13 @@ class ZenSyncManager {
         "ZenSyncManager: Vetoed remote deletion of recently used tabs",
         [...vetoedTabIds]
       );
-      // Don't let the live-apply side remove them either.
+      // Don't let the live-apply side remove them either; instead it
+      // surfaces them to the top of their section like fresh tabs, since
+      // the incoming order links don't know they survived.
       removals.tabs = removals.tabs.filter(
         removal => !vetoedTabIds.has(removal.zenSyncId)
       );
+      removals.vetoedTabIds = [...vetoedTabIds];
     }
 
     if (removedSpaceIds.size) {

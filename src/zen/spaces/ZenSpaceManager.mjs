@@ -224,6 +224,48 @@ class nsZenWorkspaces {
 
     // 3. Create/update pulled folders and tabs
     await this._applyPulledItems(pulled);
+
+    // 4. Surface tabs whose remote deletion was vetoed
+    this.#surfaceVetoedTabs(removals.vetoedTabIds);
+  }
+
+  /**
+   * A tab whose remote deletion was vetoed (the user pressed it after the
+   * close) is surfaced to the TOP of its workspace's normal section, like a
+   * freshly opened tab — "this is still here, deal with me" — instead of
+   * drifting as the incoming order links (which don't know it survived)
+   * reshuffle around it. Its re-uploaded record then propagates the top
+   * position to every device. Pinned/essential/foldered tabs keep their
+   * place: they are always visible in stable slots.
+   */
+  #surfaceVetoedTabs(vetoedTabIds) {
+    if (!vetoedTabIds?.length) {
+      return;
+    }
+    for (const id of vetoedTabIds) {
+      const tab = document.getElementById(id);
+      if (
+        !tab ||
+        !gBrowser.isTab(tab) ||
+        tab.pinned ||
+        tab.hasAttribute("zen-essential") ||
+        tab.group
+      ) {
+        continue;
+      }
+      const workspaceId = tab.getAttribute("zen-workspace-id");
+      const container = workspaceId
+        ? this.workspaceElement(workspaceId)?.tabsContainer
+        : null;
+      if (!container) {
+        continue;
+      }
+      gBrowser.zenHandleTabMove(tab, () => {
+        container.insertBefore(tab, container.firstChild);
+      });
+    }
+    this.makeSureEmptyTabIsFirst();
+    this.updateTabsContainers();
   }
 
   #getSyncedTabActiveEntry(tabData) {
