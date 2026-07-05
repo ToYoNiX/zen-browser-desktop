@@ -35,6 +35,18 @@
 - name: services.sync.engine.workspaces
   value: false
 
+# Background sync cadence floor (seconds, min 60): with workspace sync a
+# device must converge without user interaction; Firefox's defaults
+# (600 active / 3600 idle) are too slow as a push fallback.
+- name: services.sync.scheduler.immediateInterval
+  value: 60
+
+- name: services.sync.scheduler.activeInterval
+  value: 90
+
+- name: services.sync.scheduler.idleInterval
+  value: 300
+
 - name: zen.workspaces.separate-essentials
   value: true
 

@@ -80,7 +80,7 @@ export class nsZenFolder extends MozTabbrowserTabGroup {
 
     this.labelElement.onRenameFinished = newLabel => {
       this.name = newLabel.trim() || "Folder";
-      const event = new CustomEvent("ZenFolderRenamed", {
+      const event = new CustomEvent("TabGroupUpdate", {
         bubbles: true,
       });
       this.dispatchEvent(event);
@@ -172,6 +172,11 @@ export class nsZenFolder extends MozTabbrowserTabGroup {
   }
 
   async delete() {
+    Services.obs.notifyObservers(
+      null,
+      "zen-workspace-item-changed",
+      `f~${this.id}`
+    );
     for (const tab of this.allItemsRecursive) {
       if (tab.hasAttribute("zen-empty-tab")) {
         // Manually remove the empty tabs as removeTabs() inside removeTabGroup

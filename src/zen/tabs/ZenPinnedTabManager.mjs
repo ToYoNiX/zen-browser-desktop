@@ -503,7 +503,7 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
     }
   }
 
-  addToEssentials(tab) {
+  addToEssentials(tab, { force = false } = {}) {
     // eslint-disable-next-line no-nested-ternary
     const tabs = tab
       ? // if it's already an array, dont make it [tab]
@@ -518,7 +518,7 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
       // eslint-disable-next-line no-shadow
       let tab = tabs[i];
       const section = gZenWorkspaces.getEssentialsSection(tab);
-      if (!this.canEssentialBeAdded(tab)) {
+      if (!force && !this.canEssentialBeAdded(tab)) {
         movedAll = false;
         continue;
       }
@@ -543,7 +543,6 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
         gBrowser.pinTab(tab);
         this._ignoreNextTabPinnedEvent = true;
       }
-      tab.setAttribute("zenDefaultUserContextId", true);
       if (tab.selected) {
         gZenWorkspaces.switchTabIfNeeded(tab);
       }
@@ -628,11 +627,10 @@ class nsZenPinnedTabManager extends nsZenDOMOperatedFeature {
     document.getElementById("tabContextMenu").appendChild(elements);
 
     const element = window.MozXULElement.parseXULToFragment(`
-            <menuitem id="context_zen-add-essential"
-                      data-l10n-id="tab-context-zen-add-essential"
-                      hidden="true"
-                      disabled="true"
-                      command="cmd_contextZenAddToEssentials"/>
+             <menuitem id="context_zen-add-essential"
+                       data-l10n-id="tab-context-zen-add-essential"
+                       hidden="true"
+                       command="cmd_contextZenAddToEssentials"/>
             <menuitem id="context_zen-remove-essential"
                       data-lazy-l10n-id="tab-context-zen-remove-essential"
                       hidden="true"

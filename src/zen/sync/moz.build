@@ -3,6 +3,6 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 EXTRA_JS_MODULES.zen += [
-  "ZenSessionManager.sys.mjs",
-  "ZenWindowSync.sys.mjs"
+  "ZenSyncManager.sys.mjs",
+  "ZenWorkspacesSync.sys.mjs",
 ]

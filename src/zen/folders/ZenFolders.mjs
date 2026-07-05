@@ -642,16 +642,22 @@ class nsZenFolders extends nsZenDOMOperatedFeature {
     const insertBefore =
       options.insertBefore ||
       pinnedContainer.querySelector(".pinned-tabs-container-separator");
-    const emptyTab = gBrowser.addTab("about:blank", {
-      skipAnimation: true,
-      pinned: true,
-      triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
-      _forZenEmptyTab: true,
-      createLazyBrowser: true,
-    });
 
-    gBrowser.pinTab(emptyTab);
-    tabs = [emptyTab, ...filteredTabs];
+    if (!options.skipEmptyTab) {
+      const emptyTab = gBrowser.addTab("about:blank", {
+        skipAnimation: true,
+        pinned: true,
+        triggeringPrincipal:
+          Services.scriptSecurityManager.getSystemPrincipal(),
+        _forZenEmptyTab: true,
+        createLazyBrowser: true,
+      });
+
+      gBrowser.pinTab(emptyTab);
+      tabs = [emptyTab, ...filteredTabs];
+    } else {
+      tabs = filteredTabs;
+    }
 
     const folder = this._createFolderNode(options);
 
