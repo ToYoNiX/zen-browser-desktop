@@ -205,18 +205,9 @@ class ZenSyncManager {
     this._lastSnapshot = snapshot;
   }
 
-  async applyIncomingBatch(
-    pulled,
-    removals,
-    meta,
-    { isFirstSync = false } = {}
-  ) {
+  async applyIncomingBatch(pulled, removals, meta) {
     try {
       let sidebar = lazy.ZenSessionStore.getSidebarData();
-
-      if (isFirstSync) {
-        await this.#maybeAdoptRemoteSpaces(sidebar, pulled, removals);
-      }
 
       this.#applyIncomingContainers(
         pulled.containers || [],
@@ -247,70 +238,6 @@ class ZenSyncManager {
       // follows must serialize the post-merge state.
       this.invalidateSyncCache();
     }
-  }
-
-  /**
-   * First-sync adoption: a brand-new profile auto-creates its own default
-   * space before it ever syncs, so joining an existing account would union
-   * that empty default with the real remote spaces — one junk space per
-   * device. When the local sidebar is pristine and remote spaces exist,
-   * drop the local auto-created space and adopt the remote layout instead.
-   *
-   * Deliberately conservative — this must never destroy user data:
-   *   - only called on the engine's very first sync (lastSync == 0);
-   *   - requires ≥1 incoming remote space (fresh accounts adopt nothing
-   *     and upload the local default as the seed);
-   *   - requires a pristine local sidebar: exactly one space, no folders,
-   *     no pinned/essential tabs, nothing but empty tabs;
-   *   - only ever removes the LOCAL auto-created space, via the same
-   *     removals path a remote space deletion takes;
-   *   - a session-file backup is written right before adopting.
-   */
-  async #maybeAdoptRemoteSpaces(sidebar, pulled, removals) {
-    const localSpaces = sidebar.spaces || [];
-    const incomingSpaces = (pulled.spaces || []).filter(space => space.uuid);
-    if (localSpaces.length !== 1 || !incomingSpaces.length) {
-      return;
-    }
-    const defaultSpace = localSpaces[0];
-    if (incomingSpaces.some(space => space.uuid === defaultSpace.uuid)) {
-      // The remote already knows our space; nothing to adopt.
-      return;
-    }
-    // Loose unpinned tabs do NOT count as user data: signing in to the
-    // Mozilla account itself opens a tab, and extensions may open onboarding
-    // pages during setup — those must not block adoption. They are rehomed
-    // into the adopted primary space below instead of being destroyed with
-    // the default space's element.
-    const hasUserData =
-      (sidebar.folders || []).length ||
-      (sidebar.tabs || []).some(
-        tab =>
-          !tab.zenIsEmpty && (tab.pinned || tab.zenEssential || tab.groupId)
-      );
-    if (hasUserData) {
-      return;
-    }
-    const targetSpace = [...incomingSpaces].sort(
-      (a, b) => (a.position ?? Infinity) - (b.position ?? Infinity)
-    )[0];
-    await lazy.ZenSessionStore.createAdHocBackup("pre-space-adoption");
-    console.info(
-      "ZenSyncManager: First sync on a pristine profile — adopting remote spaces, dropping the local default space and rehoming its tabs",
-      { dropped: defaultSpace.uuid, rehomeTo: targetSpace.uuid }
-    );
-    for (const tab of sidebar.tabs || []) {
-      if (tab.zenWorkspace === defaultSpace.uuid) {
-        tab.zenWorkspace = targetSpace.uuid;
-      }
-    }
-    removals.spaces = [...(removals.spaces || []), { uuid: defaultSpace.uuid }];
-    // Consumed by gZenWorkspaces._applySyncChanges to move live tabs out of
-    // the doomed space before its element (and everything in it) is removed.
-    removals.adoptionRehome = {
-      fromUuid: defaultSpace.uuid,
-      toUuid: targetSpace.uuid,
-    };
   }
 
   // ---------------------------------------------------------------------

@@ -293,15 +293,11 @@ class ZenWorkspacesStore extends Store {
       }
     }
 
-    const isFirstSync = !(await this.engine.getLastSync());
-
     // Suppress change tracking while applying incoming data to prevent
     // feedback loops where applied items get re-uploaded immediately.
     this.engine._tracker.ignoreAll = true;
     try {
-      await lazy.ZenSyncStore.applyIncomingBatch(pulled, removals, null, {
-        isFirstSync,
-      });
+      await lazy.ZenSyncStore.applyIncomingBatch(pulled, removals, null);
     } finally {
       this.engine._tracker.ignoreAll = false;
     }

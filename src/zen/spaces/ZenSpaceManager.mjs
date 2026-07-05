@@ -213,11 +213,9 @@ class nsZenWorkspaces {
         const existing = localMap.get(space.uuid);
         localMap.set(space.uuid, existing ? { ...existing, ...space } : space);
       }
-      let finalSpaces = this.#getOrderedWorkspacesByPosition(
-        Array.from(localMap.values())
+      await this.propagateWorkspaces(
+        this.#getOrderedWorkspacesByPosition(Array.from(localMap.values()))
       );
-      finalSpaces = await this.#rehomeAdoptedTabs(removals, finalSpaces);
-      await this.propagateWorkspaces(finalSpaces);
       this.#propagateWorkspaceData();
     }
 
@@ -226,59 +224,6 @@ class nsZenWorkspaces {
 
     // 3. Create/update pulled folders and tabs
     await this._applyPulledItems(pulled);
-  }
-
-  /**
-   * First-sync adoption support: before the local default space is removed,
-   * move its loose tabs (the Mozilla sign-in tab, extension onboarding pages
-   * opened during setup, …) into the adopted primary space. Without this the
-   * tabs are destroyed together with the workspace element, and Zen may then
-   * spawn a fresh workspace for newly opening tabs — which syncs to every
-   * device and defeats the adoption.
-   *
-   * Works in two steps because the adopted space elements don't exist yet:
-   * first propagate with the doomed space still included (creates the new
-   * space elements), rehome the tabs, then let the caller run the final
-   * propagate that removes the now-empty default space.
-   *
-   * @param {object} removals The removals object, possibly carrying
-   *        adoptionRehome from ZenSyncManager.
-   * @param {Array} finalSpaces The final ordered workspace list.
-   * @returns {Array} The workspace list the caller should propagate.
-   */
-  async #rehomeAdoptedTabs(removals, finalSpaces) {
-    const rehome = removals.adoptionRehome;
-    if (!rehome) {
-      return finalSpaces;
-    }
-    const doomedSpace = this._workspaceCache.find(
-      w => w.uuid === rehome.fromUuid
-    );
-    if (!doomedSpace) {
-      return finalSpaces;
-    }
-    await this.propagateWorkspaces(
-      this.#getOrderedWorkspacesByPosition([...finalSpaces, doomedSpace])
-    );
-    if (!this.workspaceElement(rehome.toUuid)) {
-      console.error(
-        "gZenWorkspaces: Adoption target space has no element; keeping the local default space",
-        rehome
-      );
-      return this.#getOrderedWorkspacesByPosition([
-        ...finalSpaces,
-        doomedSpace,
-      ]);
-    }
-    for (const tab of this.allStoredTabs) {
-      if (
-        tab.getAttribute("zen-workspace-id") === rehome.fromUuid &&
-        !tab.hasAttribute("zen-empty-tab")
-      ) {
-        this.moveTabToWorkspace(tab, rehome.toUuid);
-      }
-    }
-    return finalSpaces;
   }
 
   #getSyncedTabActiveEntry(tabData) {
