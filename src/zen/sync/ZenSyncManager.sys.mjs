@@ -512,26 +512,23 @@ class ZenSyncManager {
   }
 
   /**
-   * A tab deletion is vetoed only on REAL user interaction: the tab is
-   * selected in a window the user is actually looking at (OS focus), or the
-   * user switched to it after the remote close happened. A tab merely left
-   * selected on an idle instance must NOT veto — that made it immortal and
-   * endlessly resurrected it on the closing device (a selected tab's
-   * lastAccessed always reads as "now", so timestamp checks can't help
-   * there). Vetoed tabs are re-uploaded — a deliberate resurrection
-   * everywhere.
+   * ONE rule, nothing clever: a tab deletion is vetoed only when the user
+   * demonstrably ACTED on the tab after the remote close — they clicked /
+   * switched to it (TabSelect stamps _zenLastUserInteraction). Merely being
+   * the selected tab is NOT interaction: Firefox's own close-remote-tab
+   * closes selected tabs too, and every looser rule field-tested so far
+   * made kept tabs fight the incoming order links and resurrect endlessly.
+   * A vetoed tab is re-uploaded — deliberate resurrection everywhere.
    */
   #shouldVetoTabRemoval(zenSyncId, tombstoneModifiedMs) {
+    if (!tombstoneModifiedMs) {
+      return false;
+    }
     for (const win of Services.wm.getEnumerator("navigator:browser")) {
       const tab = win.document?.getElementById(zenSyncId);
-      if (!tab || !win.gBrowser?.isTab(tab)) {
-        continue;
-      }
-      if (tab.selected && win.document.hasFocus()) {
-        return true;
-      }
       if (
-        tombstoneModifiedMs &&
+        tab &&
+        win.gBrowser?.isTab(tab) &&
         (tab._zenLastUserInteraction || 0) > tombstoneModifiedMs
       ) {
         return true;
