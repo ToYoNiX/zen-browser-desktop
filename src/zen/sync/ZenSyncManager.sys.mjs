@@ -512,22 +512,32 @@ class ZenSyncManager {
   }
 
   /**
-   * A tab deletion is vetoed when the user meaningfully interacted with the
-   * tab AFTER the remote close happened: the tab is currently selected in
-   * some window, or its lastAccessed is newer than the tombstone. A vetoed
-   * tab is kept and re-uploaded — a deliberate resurrection on every device
-   * — so a stale tab the user just opened never vanishes under them.
+   * A tab deletion is vetoed only on REAL user interaction: the tab is
+   * selected in a window the user is actually looking at (OS focus), or the
+   * user switched to it after the remote close happened. A tab merely left
+   * selected on an idle instance must NOT veto — that made it immortal and
+   * endlessly resurrected it on the closing device (a selected tab's
+   * lastAccessed always reads as "now", so timestamp checks can't help
+   * there). Vetoed tabs are re-uploaded — a deliberate resurrection
+   * everywhere.
    */
-  #shouldVetoTabRemoval(tabData, tombstoneModifiedMs) {
+  #shouldVetoTabRemoval(zenSyncId, tombstoneModifiedMs) {
     for (const win of Services.wm.getEnumerator("navigator:browser")) {
-      const tab = win.document?.getElementById(tabData.zenSyncId);
-      if (tab && win.gBrowser?.isTab(tab) && tab.selected) {
+      const tab = win.document?.getElementById(zenSyncId);
+      if (!tab || !win.gBrowser?.isTab(tab)) {
+        continue;
+      }
+      if (tab.selected && win.document.hasFocus()) {
+        return true;
+      }
+      if (
+        tombstoneModifiedMs &&
+        (tab._zenLastUserInteraction || 0) > tombstoneModifiedMs
+      ) {
         return true;
       }
     }
-    return (
-      !!tombstoneModifiedMs && (tabData.lastAccessed || 0) > tombstoneModifiedMs
-    );
+    return false;
   }
 
   #removeDeletedItems(sidebar, removals) {
@@ -546,7 +556,7 @@ class ZenSyncManager {
         tab => tab.zenSyncId === removal.zenSyncId
       );
       const tombstoneMs = (removal.tombstoneModified || 0) * 1000;
-      if (local && this.#shouldVetoTabRemoval(local, tombstoneMs)) {
+      if (local && this.#shouldVetoTabRemoval(removal.zenSyncId, tombstoneMs)) {
         vetoedTabIds.add(removal.zenSyncId);
         this.#scheduleRecordMark(`t~${removal.zenSyncId}`);
       } else {

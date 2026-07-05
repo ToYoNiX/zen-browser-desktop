@@ -1619,6 +1619,10 @@ class nsZenWindowSync {
 
   on_TabSelect(aEvent, { ignorePromise = false } = {}) {
     const tab = aEvent.target;
+    // Real user interaction stamp: the sync manager's deletion veto keys
+    // off this, NOT off tab.selected/lastAccessed (a tab left selected on
+    // an idle instance must not become immortal).
+    tab._zenLastUserInteraction = Date.now();
     if (this.#lastSelectedTab?.deref() === tab) {
       return;
     }
