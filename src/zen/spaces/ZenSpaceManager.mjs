@@ -551,7 +551,7 @@ class nsZenWorkspaces {
    * tabs to match it yanked freshly opened tabs down the list; they only
    * serve as anchors here.
    */
-  #applyIncomingTabPositions(tabDataList, incomingIds) {
+  #applyIncomingTabPositions(tabDataList, incomingIds, createdTabIds) {
     const orderedTabs = tabDataList.filter(tabData => tabData?.zenSyncId);
     if (!orderedTabs.length) {
       return;
@@ -585,6 +585,21 @@ class nsZenWorkspaces {
 
       if (!incomingIds.has(tabData.zenSyncId)) {
         // Local tab: anchor only, never repositioned.
+        continue;
+      }
+
+      // Loose unpinned tabs are owned by the local order once they exist:
+      // ANY remote change (navigation, title, favicon) re-ships a tab's
+      // record together with its order link, so repositioning existing
+      // loose tabs on incoming updates made them wander. Only the curated
+      // layers (pinned/essentials/folders) sync their order continuously;
+      // loose tabs are placed once, at creation.
+      if (
+        !createdTabIds.has(tabData.zenSyncId) &&
+        !tab.pinned &&
+        !tab.hasAttribute("zen-essential") &&
+        !tab.group
+      ) {
         continue;
       }
 
@@ -748,6 +763,7 @@ class nsZenWorkspaces {
     }
 
     // Step 2 — create or update tabs (pinned AND unpinned).
+    const createdTabIds = new Set();
     for (const tabData of incomingTabs) {
       if (!tabData.zenSyncId) {
         continue;
@@ -870,6 +886,7 @@ class nsZenWorkspaces {
         // the duringPinning code-path so ZenWindowSync propagates the tab to
         // other windows with the correct id.
         newTab.id = tabData.zenSyncId;
+        createdTabIds.add(tabData.zenSyncId);
 
         if (tabData.zenEssential) {
           // Set attributes manually but skip zen-essential — addToEssentials()
@@ -958,6 +975,7 @@ class nsZenWorkspaces {
         }
         const newTab = gBrowser.addTrustedTab(url, unpinnedOptions);
         newTab.id = tabData.zenSyncId;
+        createdTabIds.add(tabData.zenSyncId);
         if (tabData.zenWorkspace) {
           newTab.setAttribute("zen-workspace-id", tabData.zenWorkspace);
         }
@@ -986,7 +1004,8 @@ class nsZenWorkspaces {
     const incomingIds = new Set(incomingTabs.map(t => t.zenSyncId));
     this.#applyIncomingTabPositions(
       mergedTabs?.length ? mergedTabs : incomingTabs,
-      incomingIds
+      incomingIds,
+      createdTabIds
     );
     this.#applyIncomingFolderStructure(
       lazy.ZenSessionStore.getSidebarData()?.folders || incomingFolders
