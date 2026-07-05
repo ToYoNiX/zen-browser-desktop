@@ -501,20 +501,22 @@ class nsZenWorkspaces {
   }
 
   /**
-   * Re-applies the canonical tab order to the live DOM. Must be given the
-   * FULL merged tab list in session-file order — applying only the changed
-   * subset would anchor those tabs at the front of their containers, which
-   * made any tab with an updated record (even just a favicon change) jump
-   * to the top of its section on every other device.
+   * Places INCOMING tabs at their position in the canonical merged order.
+   * Must be given the FULL merged tab list (so incoming tabs anchor against
+   * their real neighbors, not the container front) together with the set of
+   * ids that actually arrived in this batch. Local tabs are NEVER moved by
+   * a sync apply — the merged file order lags the live UI, and moving local
+   * tabs to match it yanked freshly opened tabs down the list; they only
+   * serve as anchors here.
    */
-  #applyIncomingTabPositions(tabDataList) {
+  #applyIncomingTabPositions(tabDataList, incomingIds) {
     const orderedTabs = tabDataList.filter(tabData => tabData?.zenSyncId);
     if (!orderedTabs.length) {
       return;
     }
 
     const lastItemByContainer = new Map();
-    const movedItems = new Set();
+    const handledItems = new Set();
 
     for (const tabData of orderedTabs) {
       const tab = document.getElementById(tabData.zenSyncId);
@@ -525,9 +527,10 @@ class nsZenWorkspaces {
       const moveItem = tab.group?.hasAttribute("split-view-group")
         ? tab.group
         : tab;
-      if (!moveItem || movedItems.has(moveItem)) {
+      if (!moveItem || handledItems.has(moveItem)) {
         continue;
       }
+      handledItems.add(moveItem);
 
       const placement = this.#getSyncedTabContainer(tab);
       if (!placement?.container) {
@@ -537,7 +540,11 @@ class nsZenWorkspaces {
       const { container, initialSibling } = placement;
       const previousItem = lastItemByContainer.get(container);
       lastItemByContainer.set(container, moveItem);
-      movedItems.add(moveItem);
+
+      if (!incomingIds.has(tabData.zenSyncId)) {
+        // Local tab: anchor only, never repositioned.
+        continue;
+      }
 
       const anchor =
         previousItem?.parentNode === container && previousItem !== moveItem
@@ -930,12 +937,14 @@ class nsZenWorkspaces {
       }
     }
 
-    // Reposition using the FULL merged order from the session file (which
-    // already reflects both local order and the incoming records); the
-    // incoming subset alone is only a fallback if the file has no tabs yet.
+    // Place the incoming tabs using the FULL merged order from the session
+    // file as the anchor map; only the tabs that arrived in this batch are
+    // ever moved.
     const mergedTabs = lazy.ZenSessionStore.getSidebarData()?.tabs;
+    const incomingIds = new Set(incomingTabs.map(t => t.zenSyncId));
     this.#applyIncomingTabPositions(
-      mergedTabs?.length ? mergedTabs : incomingTabs
+      mergedTabs?.length ? mergedTabs : incomingTabs,
+      incomingIds
     );
     this.#applyIncomingFolderStructure(
       lazy.ZenSessionStore.getSidebarData()?.folders || incomingFolders
